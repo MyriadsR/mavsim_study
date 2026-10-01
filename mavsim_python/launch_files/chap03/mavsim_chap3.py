@@ -27,6 +27,7 @@ mav = MavDynamics(SIM.ts_simulation)
 delta = MsgDelta()
 viewers = ViewManager(mav=True, 
                       data=True,
+                      save_plots=True,
                       video=False, video_name='chap3.mp4')
 
 # initialize the simulation time
@@ -63,4 +64,4 @@ while sim_time < end_time:
     #     break
 
 # Save an Image of the Plot
-viewers.close(dataplot_name="ch3_data_plot")
+viewers.close(dataplot_name="outputs/ch3_data_plot")

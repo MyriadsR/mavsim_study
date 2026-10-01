@@ -23,13 +23,16 @@ class Plotter():
         self._widget.setLayout(self._layout)
         self._window.setCentralWidget(self._widget)
         
-    def create_plot_widget(self, plot_id="", xlabel="x_label", ylabel="y_label", 
+    def create_plot_widget(self, plot_id="", xlabel="x_label", ylabel="y_label",
                         legend=True, background_color="k", window_length=100):
         row = self._num_plots//self._plots_per_row
         col = self._num_plots%self._plots_per_row
         plot_widget = pg.PlotWidget()
         plot_widget.setLabel('left', ylabel)
         plot_widget.setLabel('bottom', xlabel)
+        # show raw data values on the axes (no x10^k SI-prefix scaling)
+        plot_widget.getAxis('left').enableAutoSIPrefix(False)
+        plot_widget.getAxis('bottom').enableAutoSIPrefix(False)
         plot_widget.setBackground(background_color)
         if legend == True:
             plot_widget.addLegend()
