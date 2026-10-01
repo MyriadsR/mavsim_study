@@ -26,8 +26,9 @@ import time
 wind = WindSimulation(SIM.ts_simulation)
 mav = MavDynamics(SIM.ts_simulation)
 delta = MsgDelta()
-viewers = ViewManager(mav=True, 
+viewers = ViewManager(mav=True,
                       data=True,
+                      save_plots=True,
                       video=False, video_name='chap4.mp4')
 
 # initialize the simulation time
@@ -63,4 +64,4 @@ while sim_time < end_time:
     sim_time += SIM.ts_simulation
     time.sleep(0.002) # slow down the simulation for visualization
 
-viewers.close(dataplot_name="ch4_data_plot")
+viewers.close(dataplot_name="outputs/ch4_data_plot")
