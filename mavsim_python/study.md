@@ -160,3 +160,757 @@ PathPlanner (simple / RRT) → MsgWaypoints → PathManager → MsgPath
 这个仓库最适合作为“按 TODO 完成教材作业”的模板。当前真正较完整、可独立学习/复用的是：消息类、旋转变换、RK4 框架、PI/PID/PD/TF 控制块、通用 EKF、相机针孔投影、目标道路运动、信号与可视化工具。完整的飞机—传感器—估计—控制—规划闭环**当前不能正常产生可信仿真**，原因包括动力学导数、气动力/推进、传感器、配平/线性化、控制参数与飞控、观测模型、路径跟随/管理和 RRT/Dubins 都有占位实现；另有前述 `TransferFunction` 未导入和 `path_manager.py` 语法问题。
 
 推荐按 chap03→04→05→06→07→08→10→11→12→13 的顺序实现和检查，每完成一层就运行同章节 `chap*_check.py`（现有检查主要覆盖 chap03–05、07）。实现时应始终先确认矩阵维度和坐标系：位置 NED、海拔为 `-p_d`、旋转矩阵方向为 body→inertial、风的稳态/阵风坐标系不同；这是本工程最容易造成“数值看似稳定却方向全错”的问题。
+
+
+## 10. `compute_models.py` 公式与线性模型问答
+
+> 整理时间：2026-10-10。以下收录本次对话中从 `compute_models.py` 公式解释开始的四轮提问与回答，保留公式、数值比较及后续澄清。第 1～9 节是 2026-09-23 的历史笔记，其中关于第 3～5 章未实现的描述不代表当前代码状态；本节说明针对当前实现。
+
+### 10.1 代码与 PDF 数学公式的对应关系
+
+**提问：** 解释一下 [compute_models.py](/home/zr/mavsim_public/mavsim_python/models/compute_models.py) 代码对应pdf中的数学公式
+
+**回答：**
+
+[compute_models.py](/home/zr/mavsim_public/mavsim_python/models/compute_models.py) 的作用是：**在给定配平状态和配平输入附近，把非线性飞机模型转换成控制设计用的线性模型。**
+
+它主要对应第 5 章中的传递函数推导与数值线性化部分，下面的 Slide 编号均指这份资料：[chap5.pdf](/home/zr/mavsim_public/pdf/chap5.pdf)
+
+代码有两条计算路线：
+
+```text
+配平状态、配平输入
+    ├─ compute_ss_model → 纵向、横向状态空间矩阵
+    └─ compute_tf_model → 滚转、俯仰、空速传递函数系数
+```
+
+**先明确状态和输入的顺序。**
+
+代码使用的欧拉角状态是：
+
+$$
+x_e=
+[p_n,p_e,p_d,u,v,w,\phi,\theta,\psi,p,q,r]^T
+$$
+
+其中 $u,v,w$ 是机体系速度，$p,q,r$ 是机体系角速度。这里的 $q$ 表示俯仰角速度。
+
+控制输入向量为：
+
+$$
+\delta=[\delta_e,\delta_a,\delta_r,\delta_t]^T
+$$
+
+分别是升降舵、副翼、方向舵和油门。**PDF Slide 53、54 使用的输入顺序是 $[\delta_t,\delta_e,\delta_a,\delta_r]^T$，代码的顺序不同，所以输入选择矩阵也相应调整了。**
+
+---
+
+**1. `euler_state()`、`quaternion_state()`：对应 Slide 50、51 的坐标转换**
+
+飞机仿真内部使用四元数状态：
+
+$$
+x_q=
+[p_n,p_e,p_d,u,v,w,e_0,e_1,e_2,e_3,p,q,r]^T
+\in\mathbb R^{13}
+$$
+
+而线性模型使用欧拉角状态 $x_e\in\mathbb R^{12}$。
+
+[第 151 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:151) 的 `euler_state()` 实现：
+
+$$
+x_e=T_e(x_q)
+$$
+
+即把四元数替换成 $\phi,\theta,\psi$，其他状态保持原顺序。
+
+[第 160 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:160) 的 `quaternion_state()` 实现反向转换：
+
+$$
+x_q=T_q(x_e)
+$$
+
+这样，线性化计算可以用欧拉角扰动，底层仍调用已经实现的四元数动力学。
+
+---
+
+**2. `f_euler()`：对应 Slide 52 的欧拉角动力学**
+
+底层飞机模型给出：
+
+$$
+\dot x_q=f_q(x_q,\delta)
+$$
+
+但需要求导的是欧拉角动力学：
+
+$$
+\dot x_e=f_e(x_e,\delta)
+$$
+
+根据链式法则：
+
+$$
+f_e(x_e,\delta)=
+\left.
+\frac{\partial T_e}{\partial x_q}
+\right|_{x_q=T_q(x_e)}
+f_q(T_q(x_e),\delta)
+$$
+
+[第 167 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:167) 的实现分为两步。
+
+首先，将欧拉角状态转换成四元数状态，更新空速和气动力，再调用：
+
+```python
+f = mav._f(x_quat, forces_moments)
+```
+
+得到 13 维四元数状态导数。
+
+随后保留位置、速度和角速度导数，将四元数导数替换为以下三个欧拉角运动学公式：
+
+$$
+\begin{aligned}
+\dot\phi
+&=p+q\sin\phi\tan\theta+r\cos\phi\tan\theta\\
+\dot\theta
+&=q\cos\phi-r\sin\phi\\
+\dot\psi
+&=\frac{q\sin\phi+r\cos\phi}{\cos\theta}
+\end{aligned}
+$$
+
+这正是 PDF Slide 3 中的姿态运动学方程。代码直接使用解析公式，等价于 Slide 52 的链式法则转换，不需要显式构造整个转换雅可比矩阵。
+
+---
+
+**3. `df_dx()`、`df_du()`：对应 Slide 37、48、49、52 的线性化**
+
+在配平点 $(x_e^*,\delta^*)$ 附近做一阶泰勒展开：
+
+$$
+f_e(x_e^*+\tilde x_e,\delta^*+\tilde\delta)
+\approx
+f_e(x_e^*,\delta^*)+
+A\tilde x_e+B\tilde\delta
+$$
+
+其中：
+
+$$
+A=
+\left.\frac{\partial f_e}{\partial x_e}\right|_*
+\in\mathbb R^{12\times12},
+\qquad
+B=
+\left.\frac{\partial f_e}{\partial\delta}\right|_*
+\in\mathbb R^{12\times4}
+$$
+
+减去名义配平运动的导数后，得到：
+
+$$
+\dot{\tilde x}_e=A\tilde x_e+B\tilde\delta
+$$
+
+[第 193 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:193) 的 `df_dx()` 使用前向差分，逐列计算 $A$：
+
+$$
+A_{:,j}\approx
+\frac{
+f_e(x_e^*+\varepsilon\,\mathbf e_j,\delta^*)
+-f_e(x_e^*,\delta^*)
+}{\varepsilon}
+$$
+
+这里 $\mathbf e_j$ 表示第 $j$ 个坐标方向，代码取 $\varepsilon=0.01$。
+
+对应代码：
+
+```python
+x_eps[i][0] += eps
+df_dxi = (f_at_x_eps - f_at_x) / eps
+A[:, i] = df_dxi[:, 0]
+```
+
+因此，**$A$ 的第 $j$ 列表示：只改变第 $j$ 个状态时，各状态导数如何变化。**
+
+[第 211 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:211) 的 `df_du()` 同理计算：
+
+$$
+B_{:,j}\approx
+\frac{
+f_e(x_e^*,\delta^*+\varepsilon\,\mathbf e_j)
+-f_e(x_e^*,\delta^*)
+}{\varepsilon}
+$$
+
+例如：
+
+$$
+B_{10,0}=\frac{\partial\dot q}{\partial\delta_e}
+$$
+
+表示升降舵对俯仰角加速度的影响。这里的下标采用代码中的 **从零开始编号**。
+
+---
+
+**4. `compute_ss_model()`：对应 Slide 53、54 的纵向与横向模型**
+
+[第 122 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:122) 先计算完整 $A,B$，再通过选择矩阵提取两个子模型。
+
+纵向状态和输入为：
+
+$$
+x_{\rm lon}=[u,w,q,\theta,h]^T,
+\qquad
+\delta_{\rm lon}=[\delta_e,\delta_t]^T
+$$
+
+其中：
+
+$$
+h=-p_d
+$$
+
+代码中的 $E_1,E_2$ 满足：
+
+$$
+x_{\rm lon}=E_1x_e,
+\qquad
+\delta_{\rm lon}=E_2\delta
+$$
+
+所以：
+
+$$
+\boxed{
+A_{\rm lon}=E_1AE_1^T,\qquad
+B_{\rm lon}=E_1BE_2^T
+}
+$$
+
+这对应：
+
+```python
+A_lon = E1 @ A @ E1.T
+B_lon = E1 @ B @ E2.T
+```
+
+$E_1$ 最后一行在 $p_d$ 位置放置 `-1`，因此会同时正确处理高度状态及高度导数的符号。
+
+横向状态和输入为：
+
+$$
+x_{\rm lat}=[v,p,r,\phi,\psi]^T,
+\qquad
+\delta_{\rm lat}=[\delta_a,\delta_r]^T
+$$
+
+类似地：
+
+$$
+\boxed{
+A_{\rm lat}=E_3AE_3^T,\qquad
+B_{\rm lat}=E_3BE_4^T
+}
+$$
+
+最终矩阵维度为：
+
+| 矩阵 | 维度 | 含义 |
+|---|---:|---|
+| $A_{\rm lon}$ | $5\times5$ | 纵向状态之间的影响 |
+| $B_{\rm lon}$ | $5\times2$ | 升降舵、油门对纵向运动的影响 |
+| $A_{\rm lat}$ | $5\times5$ | 横向状态之间的影响 |
+| $B_{\rm lat}$ | $5\times2$ | 副翼、方向舵对横向运动的影响 |
+
+这种提取对应教材在直线配平附近采用的纵向、横向解耦近似。
+
+---
+
+**5. `compute_tf_model()`：对应滚转、俯仰和空速传递函数**
+
+[第 88 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:88) 的这个函数返回的是**传递函数系数**，没有创建传递函数对象。
+
+**滚转部分对应 Slide 22～24。**
+
+忽略耦合扰动后：
+
+$$
+\ddot\phi=-a_{\phi1}\dot\phi+a_{\phi2}\delta_a
+$$
+
+于是：
+
+$$
+\frac{\Phi(s)}{\Delta_a(s)}
+=
+\frac{a_{\phi2}}{s(s+a_{\phi1})}
+$$
+
+在直线配平附近，$\dot\phi\approx p$，所以：
+
+$$
+a_{\phi1}
+=-\frac{\partial\dot p}{\partial p},
+\qquad
+a_{\phi2}
+=\frac{\partial\dot p}{\partial\delta_a}
+$$
+
+这解释了：
+
+```python
+a_phi1 = -A.item(9, 9)
+a_phi2 = B.item(9, 1)
+```
+
+因为 $x_e[9]=p$，而输入第 1 项是副翼。
+
+**俯仰部分对应 Slide 29～31。**
+
+简化模型为：
+
+$$
+\ddot\theta
+=-a_{\theta1}\dot\theta
+-a_{\theta2}\theta
++a_{\theta3}\delta_e+d_{\theta2}
+$$
+
+忽略扰动后：
+
+$$
+\frac{\Theta(s)}{\Delta_e(s)}
+=
+\frac{a_{\theta3}}
+{s^2+a_{\theta1}s+a_{\theta2}}
+$$
+
+代码计算：
+
+$$
+\begin{aligned}
+a_{\theta1}
+&=-\frac{\partial\dot q}{\partial q}\\
+a_{\theta2}
+&=-\frac{\rho V_a^{*2}Sc}{2J_y}C_{m_\alpha}\\
+a_{\theta3}
+&=\frac{\partial\dot q}{\partial\delta_e}
+\end{aligned}
+$$
+
+对应：
+
+```python
+a_theta1 = -A.item(10, 10)
+a_theta2 = -rho * Va_trim**2 * S * c * C_m_alpha / (2 * Jy)
+a_theta3 = B.item(10, 0)
+```
+
+**为什么 `a_theta2` 没有直接从 $A$ 提取？**
+
+PDF 推导用到了：
+
+$$
+\alpha=\theta-\gamma
+$$
+
+把迎角力矩中的 $\theta$ 项留下，将航迹角等影响并入扰动。完整状态空间里，$\theta$ 和机体系速度是独立状态，因此 $\partial\dot q/\partial\theta$ 并不直接等于简化模型中的 $-a_{\theta2}$。
+
+**空速部分对应 Slide 35、36。**
+
+配平附近的扰动方程为：
+
+$$
+\dot{\tilde V}_a
+=-a_{V1}\tilde V_a
++a_{V2}\tilde\delta_t
+-a_{V3}\tilde\theta
+$$
+
+系数为：
+
+$$
+\boxed{
+a_{V1}
+=
+\frac{\rho V_a^*S}{m}
+\left(
+C_{D_0}+C_{D_\alpha}\alpha^*
++C_{D_{\delta_e}}\delta_e^*
+\right)
+-\frac1m
+\left.\frac{\partial T_p}{\partial V_a}\right|_*
+}
+$$
+
+$$
+\boxed{
+a_{V2}
+=\frac1m
+\left.\frac{\partial T_p}{\partial\delta_t}\right|_*,
+\qquad
+a_{V3}=g\cos(\theta^*-\alpha^*)
+}
+$$
+
+它们分别表示空速自身的响应、油门控制能力，以及俯仰变化带来的重力影响。对应传递函数：
+
+$$
+\frac{\tilde V_a(s)}{\tilde\Delta_t(s)}
+=\frac{a_{V2}}{s+a_{V1}},
+\qquad
+\frac{\tilde V_a(s)}{\tilde\Theta(s)}
+=-\frac{a_{V3}}{s+a_{V1}}
+$$
+
+这里使用教材的线性阻力近似；完整状态空间矩阵直接对非线性模型求导，两种模型的系数不必完全相同。
+
+---
+
+**6. `dT_dVa()`、`dT_ddelta_t()`：求推进模型的局部斜率**
+
+[第 233 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:233) 的两个函数分别计算：
+
+$$
+\frac{\partial T_p}{\partial V_a}
+\approx
+\frac{T_p(V_a+\varepsilon,\delta_t)-T_p(V_a,\delta_t)}
+{\varepsilon}
+$$
+
+$$
+\frac{\partial T_p}{\partial\delta_t}
+\approx
+\frac{T_p(V_a,\delta_t+\varepsilon)-T_p(V_a,\delta_t)}
+{\varepsilon}
+$$
+
+它们直接调用当前电机—螺旋桨模型，取返回值中的推力 $T_p$，用于前面的 $a_{V1},a_{V2}$。
+
+**`compute_model()` 则负责汇总和保存。** [第 16 行](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:16) 调用上述两条路线，将配平点、模型矩阵和传递函数系数写入 `model_coef.py`。保存的 $A,B$ 都是**连续时间模型**；文件中的 `Ts` 只是记录采样周期，这里没有进行离散化。
+
+### 10.2 PDF 公式与矩阵提取的差别
+
+**提问：** 直接用pdf中的公式计算和从 $A$ 提取的差别大吗？具体有什么差别？我看代码中有的是公式直接计算，有的是直接从 A 中提取
+
+**回答：**
+
+**当前配平点下，能直接对应的系数几乎完全相同；有些系数需要先改变变量、做简化，不能直接取 $A$ 中的某一个元素。** 代码混用这两种方式，主要是因为它们的数学对应关系不同。
+
+我用当前代码重新计算了 $V_a=25\,\mathrm{m/s}$、水平直线飞行的配平点，迎角约为 $0.04970\,\mathrm{rad}$。
+
+**1. 滚转、俯仰的这四项，两种算法基本完全等价。**
+
+[compute_tf_model](/home/zr/mavsim_public/mavsim_python/models/compute_models.py:88) 中的结果如下。这里 $A$ 是状态导数矩阵，$B$ 是控制输入导数矩阵，索引按 Python 从零开始。
+
+| 系数 | PDF 公式直接计算 | 从矩阵提取 | 数值 |
+|---|---|---|---:|
+| $a_{\phi1}$ | $-\frac{\rho V_aSb^2}{4}C_{p_p}$ | $-A[9,9]$ | 22.628851 |
+| $a_{\phi2}$ | $\frac{\rho V_a^2Sb}{2}C_{p_{\delta_a}}$ | $B[9,1]$ | 130.883678 |
+| $a_{\theta1}$ | $-\frac{\rho V_aSc^2}{4J_y}C_{m_q}$ | $-A[10,10]$ | 5.294738 |
+| $a_{\theta3}$ | $\frac{\rho V_a^2Sc}{2J_y}C_{m_{\delta_e}}$ | $B[10,0]$ | −36.112390 |
+
+两种算法的绝对差都小于 $6\times10^{-14}$，可以视为相同。
+
+原因是，例如：
+
+$$
+A[10,10]=\frac{\partial\dot q}{\partial q},
+\qquad
+B[10,0]=\frac{\partial\dot q}{\partial\delta_e}.
+$$
+
+当前动力学模型的俯仰力矩对 $q$、$\delta_e$ 是线性的，对它们求导就直接得到 PDF 的公式。滚转两项也一样。**这里从矩阵提取只是通过数值求导得到相同的系数。**
+
+上述等价关系针对当前直线配平条件；在角速度不为零等条件下，完整模型中的惯性耦合可能给矩阵元素增加额外贡献。
+
+**2. $a_{\theta2}$ 不能直接取 $-A[10,7]$。**
+
+PDF 的俯仰简化模型先使用：
+
+$$
+\alpha=\theta-\gamma,\qquad \dot\theta\approx q,
+$$
+
+再将航迹角 $\gamma$ 的影响作为扰动，得到：
+
+$$
+\ddot\theta+a_{\theta1}\dot\theta+a_{\theta2}\theta
+=a_{\theta3}\delta_e+d_\theta,
+$$
+
+其中：
+
+$$
+a_{\theta2}
+=-\frac{\rho V_a^2Sc}{2J_y}C_{m_\alpha}
+\approx99.947422.
+$$
+
+这是第五章俯仰传递函数推导中的简化。[chap5.pdf](/home/zr/mavsim_public/pdf/chap5.pdf)
+
+但是完整模型的状态里，$u,w,\theta$ 是独立变量。计算
+
+$$
+A[10,7]=\left.\frac{\partial\dot q}{\partial\theta}\right|_{u,w,\ldots\ \text{不变}}
+$$
+
+时，只改变姿态角，保持机体系速度不变。此时
+
+$$
+\alpha=\operatorname{atan2}(w,u)
+$$
+
+没有改变，俯仰气动力矩也没有改变，所以当前模型给出：
+
+$$
+A[10,7]=0.
+$$
+
+**这里的 $99.947422$ 与 $0$ 表示不同的偏导关系，不能把差异解释为计算误差。**
+
+如果希望从 $A$ 得到迎角对应的系数，需要在保持空速不变时，让 $u,w$ 随迎角一起变化：
+
+$$
+u=V_a\cos\alpha,\qquad w=V_a\sin\alpha,
+$$
+
+因此：
+
+$$
+\frac{\partial\dot q}{\partial\alpha}
+=-wA[10,3]+uA[10,5],
+$$
+
+$$
+\boxed{a_{\theta2}\approx wA[10,3]-uA[10,5]}.
+$$
+
+随后再使用 PDF 中 $\alpha=\theta-\gamma$ 的简化，才能把它放入俯仰传递函数。代码直接使用公式，正好省去了这个转换过程。
+
+**3. 空速系数的差异，目前很小，但包含模型近似。**
+
+同样不能把 $a_{V1}$ 直接当成 $-A[3,3]$，因为：
+
+$$
+A[3,3]=\frac{\partial\dot u}{\partial u},
+\qquad
+V_a=\sqrt{u^2+v^2+w^2}.
+$$
+
+机体系的 $u$ 与空速 $V_a$ 是不同变量。在当前零风条件下，令速度方向单位向量为：
+
+$$
+\boldsymbol n=\frac{[u,v,w]^T}{V_a},
+$$
+
+保持迎角、侧滑角不变，正确的比较近似为：
+
+$$
+a_{V1}^{\mathrm{完整模型}}
+\approx-\boldsymbol n^TA[3:6,3:6]\boldsymbol n,
+$$
+
+$$
+a_{V2}^{\mathrm{完整模型}}
+=\boldsymbol n^TB[3:6,3].
+$$
+
+实际计算结果：
+
+| 系数 | 当前 PDF 简化公式 | 完整模型经空速方向转换 | 相对差异 |
+|---|---:|---:|---:|
+| $a_{V1}$ | 0.296135 | 0.295877 | 约 0.09% |
+| $a_{V2}$ | 9.550080 | 9.538287 | 约 0.12% |
+
+差异主要来自：
+
+- PDF 空速简化公式使用线性阻力系数；动力学代码使用包含诱导阻力的非线性表达式。
+- 完整模型中，推力沿空速方向的分量包含 $\cos\alpha$；简化公式相当于采用 $\cos\alpha\approx1$。
+- $A$ 使用步长 $0.01$ 的前向差分，也有少量数值误差。
+
+当前迎角很小，所以这些差异很小。其他配平点需要重新评估。
+
+**4. 系数一致，也不代表完整模型与简化传递函数的响应完全一致。**
+
+例如 PDF 中：
+
+$$
+\frac{\phi(s)}{\delta_a(s)}
+=\frac{a_{\phi2}}{s(s+a_{\phi1})}.
+$$
+
+即使这两个系数与矩阵提取结果完全相同，完整横向模型仍包含侧向速度 $v$、偏航角速度 $r$ 等耦合。完整模型的传递函数需要通过：
+
+$$
+G(s)=C(sI-A)^{-1}B+D
+$$
+
+计算，阶数和动态响应可能不同。
+
+所以，**当前代码对滚转和俯仰的四个直接偏导系数采用矩阵提取是合理的；$a_{\theta2}$ 和空速系数采用公式，则是在明确使用 PDF 的简化模型。** 若要让这些简化系数与完整动力学严格一致，需要进行相应的变量转换和降阶，不能统一改成取某个矩阵元素。
+
+### 10.3 矩阵提取是否代表未简化
+
+**提问：** 是不是从矩阵中提取的就是未简化的，而用 PDF 公式中的就是简化的？
+
+**回答：**
+
+**不完全是。关键在于保留了哪些状态和耦合关系，不能只看系数是从矩阵提取，还是用公式计算。**
+
+可以把代码分成三个层次理解：
+
+1. **原始非线性动力学模型**
+   包含完整的状态、气动力、推进力和运动耦合。
+
+2. **线性化后的 $A,B$ 模型**
+   在配平点附近，用一阶偏导近似原始模型：
+   $$
+   \Delta\dot x=A\Delta x+B\Delta\delta.
+   $$
+   它已经忽略了二阶及以上的非线性项，因此也经过了近似，但完整的 $A,B$ 仍保留各状态之间的一阶耦合。
+
+3. **PDF 中的简化传递函数**
+   进一步忽略部分状态和耦合，只保留主要动态。即使系数取自完整 $A,B$，把它们放进简化传递函数后，得到的仍是简化模型。
+
+例如，完整横向模型中的滚转角速度方程包含：
+
+$$
+\Delta\dot p
+=A_{pv}\Delta v+A_{pp}\Delta p+A_{pr}\Delta r
++B_{p\delta_a}\Delta\delta_a+B_{p\delta_r}\Delta\delta_r.
+$$
+
+代码提取：
+
+$$
+a_{\phi1}=-A_{pp},\qquad a_{\phi2}=B_{p\delta_a},
+$$
+
+再用于：
+
+$$
+\Delta\dot p=-a_{\phi1}\Delta p+a_{\phi2}\Delta\delta_a,
+\qquad \Delta\dot\phi\approx\Delta p.
+$$
+
+这里已经舍去了侧向速度、偏航角速度和方向舵等影响。**系数来自完整矩阵，但组装出来的滚转模型仍然是简化的。**
+
+另一方面，PDF 的公式也可能恰好是某个偏导数的解析表达式。例如当前配平条件下：
+
+$$
+-\frac{\partial\dot q}{\partial q}
+=-\frac{\rho V_aSc^2}{4J_y}C_{m_q}
+=a_{\theta1}.
+$$
+
+用公式直接计算，与从 $A$ 提取，得到的是同一个量。**公式计算本身并不意味着多做了一层简化。**
+
+因此，我之前那句话更准确的表述是：**这四个系数可以从完整线性化模型中提取，而且在当前配平条件下与 PDF 公式等价；它们随后用于构造 PDF 的简化传递函数。**
+
+### 10.4 为什么 PDF 公式与线性化矩阵的某些元素不一致
+
+**提问：** 那为什么 PDF 推导出来的公式有时候会和线性化中的 $A$ 矩阵不一样，所以不能用 $A$ 矩阵的公式？
+
+**回答：**
+
+**不是不能用 $A$，而是不能总把 PDF 中的系数对应到 $A$ 的某一个元素。** PDF 推导和完整模型线性化，有时改变的是不同变量，有时采用了不同近似。
+
+$A$ 中每个元素的含义很严格：
+
+$$
+A_{ij}=\left.\frac{\partial f_i}{\partial x_j}\right|_{\text{其他状态不变}}.
+$$
+
+而 PDF 在推导传递函数时，可能先规定某些变量之间的关系，再求系数。这样得到的变化率，不一定是上面这个偏导。
+
+用你关注的 $a_{\theta2}$ 举例最清楚。
+
+**在完整 $A$ 中，只改变 $\theta$，保持 $u,w$ 不变。**
+
+零风时：
+
+$$
+\alpha=\operatorname{atan2}(w,u).
+$$
+
+因为 $u,w$ 不变，迎角不变，当前模型的俯仰气动力矩也不变，所以：
+
+$$
+\frac{\partial\dot q}{\partial\theta}=0.
+$$
+
+从物理上看，机体系速度不变、姿态改变，会让惯性系中的飞行方向一起改变。此时航迹角 $\gamma$ 也改变了。
+
+**PDF 的俯仰简化模型，则把航迹角变化作为扰动处理。**
+
+在纵向平面中：
+
+$$
+\alpha=\theta-\gamma.
+$$
+
+考察俯仰角自身的作用、暂时令 $\Delta\gamma=0$，就有：
+
+$$
+\Delta\alpha=\Delta\theta.
+$$
+
+这时改变 $\theta$ 会改变迎角，进而改变俯仰力矩。因此：
+
+$$
+\Delta\dot q
+=M_q\Delta q+M_\alpha\Delta\alpha+M_{\delta_e}\Delta\delta_e
+$$
+
+变成：
+
+$$
+\Delta\dot q
+=M_q\Delta q+M_\alpha\Delta\theta
++M_{\delta_e}\Delta\delta_e-M_\alpha\Delta\gamma.
+$$
+
+最后一项归入扰动，得到：
+
+$$
+a_{\theta2}=-M_\alpha
+=-\frac{\rho V_a^2Sc}{2J_y}C_{m_\alpha}.
+$$
+
+**所以两者并没有数学矛盾：一个保持机体系速度不变，另一个考察航迹角不变时的俯仰变化。**
+
+如果要通过 $A$ 算出这个系数，就必须让速度分量按相同条件变化。在空速不变、侧滑为零时：
+
+$$
+u=V_a\cos\alpha,\qquad w=V_a\sin\alpha,
+$$
+
+因此：
+
+$$
+M_\alpha
+=\frac{\partial\dot q}{\partial u}\frac{\partial u}{\partial\alpha}
++\frac{\partial\dot q}{\partial w}\frac{\partial w}{\partial\alpha}
+=-wA[10,3]+uA[10,5].
+$$
+
+于是：
+
+$$
+\boxed{a_{\theta2}\approx wA[10,3]-uA[10,5]}.
+$$
+
+这就是**用 $A$ 得到 PDF 系数的正确方式**，而不是直接取 $-A[10,7]$。
+
+另外还有两类差异：
+
+- **模型近似不同。** PDF 空速推导使用简化阻力表达式，而当前动力学使用包含诱导阻力的表达式，即使比较相同变量的导数，也可能不同。
+- **保留的耦合不同。** 完整 $A$ 保留多个状态之间的耦合；PDF 的低阶传递函数会忽略部分耦合。若要得到完整线性模型的传递函数，应计算 $C(sI-A)^{-1}B+D$，不能只取几个元素组装。
+
+因此，判断能否直接提取，要核对三件事：**是不是同一个变化率、保持不变的条件是否相同、使用的动力学近似是否相同。** 对当前的 $a_{\theta1}$ 等四项，这些条件一致，所以公式和矩阵提取相同；对 $a_{\theta2}$，需要先做上述变量转换。
