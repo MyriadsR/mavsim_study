@@ -27,8 +27,9 @@ import time
 # initialize elements of the architecture
 wind = WindSimulation(SIM.ts_simulation)
 mav = MavDynamics(SIM.ts_simulation)
-viewers = ViewManager(mav=True, 
+viewers = ViewManager(mav=True,
                       data=True,
+                      save_plots=True,
                       video=False, video_name='chap5.mp4')
 
 # use compute_trim function to compute trim state and trim input
@@ -84,7 +85,7 @@ while sim_time < end_time:
     sim_time += SIM.ts_simulation
     time.sleep(0.002) # slow down the simulation for visualization
     
-viewers.close(dataplot_name="ch5_data_plot")
+viewers.close(dataplot_name="outputs/ch5_data_plot")
 
 
 
