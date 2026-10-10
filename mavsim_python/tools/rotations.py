@@ -18,13 +18,16 @@ def quaternion_to_euler(quaternion: npt.NDArray[np.float64]) -> tuple[float]:
     Returns:
         tuple of euler angles
     """
-    e0 = quaternion.item(0)
-    e1 = quaternion.item(1)
-    e2 = quaternion.item(2)
-    e3 = quaternion.item(3)
+    # RK4 stages and constrained-optimizer trials need not be unit length.
+    q = np.asarray(quaternion, dtype=float).reshape(-1)
+    if q.size != 4 or not np.all(np.isfinite(q)):
+        raise ValueError("Quaternion must have four finite elements.")
+    norm = np.linalg.norm(q)
+    if norm == 0:
+        raise ValueError("Zero-norm quaternion is invalid.")
+    e0, e1, e2, e3 = q / norm
     phi = np.arctan2(2.0 * (e0 * e1 + e2 * e3), e0**2.0 + e3**2.0 - e1**2.0 - e2**2.0)
-    # theta = np.arcsin(2.0 * (e0 * e2 - e1 * e3))
-    theta = -np.pi/2.0 + 2*np.arctan2(np.sqrt(1+2.0*(e0*e2-e1*e3)), np.sqrt(1-2.0*(e0*e2-e1*e3)))
+    theta = np.arcsin(np.clip(2.0 * (e0 * e2 - e1 * e3), -1.0, 1.0))
     psi = np.arctan2(2.0 * (e0 * e3 + e1 * e2), e0**2.0 + e1**2.0 - e2**2.0 - e3**2.0)
     return phi, theta, psi
 
