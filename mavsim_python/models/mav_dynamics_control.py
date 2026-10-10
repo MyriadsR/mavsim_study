@@ -43,16 +43,29 @@ class MavDynamics(MavDynamicsForces):
             wind is the wind vector in inertial coordinates
             Ts is the time step between function calls.
         '''
-        # get forces and moments acting on rigid bod
-        forces_moments = self._forces_moments(delta)
-        super()._rk4_step(forces_moments)
+        # Controls and wind are held constant over this sample, but aerodynamic
+        # forces must be recomputed at each RK4 stage's state.
+        state = self._state[0:13].copy()
+        dt = self._ts_simulation
+        k1 = self._control_derivatives(state, delta, wind)
+        k2 = self._control_derivatives(state + dt / 2 * k1, delta, wind)
+        k3 = self._control_derivatives(state + dt / 2 * k2, delta, wind)
+        k4 = self._control_derivatives(state + dt * k3, delta, wind)
+        self._state[0:13] = state + dt / 6 * (k1 + 2*k2 + 2*k3 + k4)
+        self._state[6:10] /= np.linalg.norm(self._state[6:10])
         # update the airspeed, angle of attack, and side slip angles using new state
         self._update_velocity_data(wind)
+        self._forces = self._forces_moments(delta)[0:3].copy()
         # update the message class for the true state
         self._update_true_state()
 
     ###################################
     # private functions
+    def _control_derivatives(self, state, delta, wind):
+        self._state[0:13] = state
+        self._update_velocity_data(wind)
+        return self._f(state, self._forces_moments(delta))
+
     def _update_velocity_data(self, wind=np.zeros((6,1))):
         steady_state = wind[0:3]
         gust = wind[3:6]
@@ -209,7 +222,8 @@ class MavDynamics(MavDynamicsForces):
         self.true_state.theta = theta
         self.true_state.psi = psi
         self.true_state.Vg = np.linalg.norm(pdot)
-        self.true_state.gamma = np.arcsin(pdot.item(2) / self.true_state.Vg)
+        # NED down velocity is negative during a positive-angle climb.
+        self.true_state.gamma = np.arctan2(-pdot.item(2), np.linalg.norm(pdot[0:2]))
         self.true_state.chi = np.arctan2(pdot.item(1), pdot.item(0))
         self.true_state.p = self._state.item(10)
         self.true_state.q = self._state.item(11)
