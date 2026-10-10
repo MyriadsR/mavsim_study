@@ -15,8 +15,11 @@ class TransferFunction:
         self.Ts = Ts
         # make the leading coef of den == 1
         if den.item(0) != 1:
-            den = den / den.item(0)
-            num = num / den.item(0)
+            leading_coefficient = den.item(0)
+            if leading_coefficient == 0:
+                raise ValueError("Denominator must have a nonzero leading coefficient.")
+            den = den / leading_coefficient
+            num = num / leading_coefficient
         self.num = num
         self.den = den
         # set up state space equations in control canonic form
@@ -91,5 +94,4 @@ if __name__ == "__main__":
     # plot output vs time
     plt.plot(time, output)
     plt.show()
-
 
