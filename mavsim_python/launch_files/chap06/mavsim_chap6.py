@@ -30,8 +30,9 @@ import time
 wind = WindSimulation(SIM.ts_simulation)
 mav = MavDynamics(SIM.ts_simulation)
 autopilot = Autopilot(SIM.ts_simulation)
-viewers = ViewManager(mav=True, 
+viewers = ViewManager(mav=True,
                       data=True,
+                      save_plots=True,
                       video=False, video_name='chap6.mp4')
 
 # autopilot commands
@@ -87,7 +88,7 @@ while sim_time < end_time:
     sim_time += SIM.ts_simulation
     time.sleep(0.002) # slow down the simulation for visualization
 
-viewers.close(dataplot_name="ch6_data_plot")
+viewers.close(dataplot_name="outputs/ch6_data_plot")
 
 
 
